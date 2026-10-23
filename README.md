@@ -65,7 +65,7 @@ python3 tools/build_plugin.py
 
 The installable ZIP is written to `dist/`. For ordinary builds, the version comes from `plugin/__init__.py`. The archive includes only the plugin modules, its import marker, this README and the license. Tests, books, local settings and caches are excluded.
 
-GitHub Actions runs the same build on every push, pull request and manual run, then uploads the ZIP as a workflow artifact. Pushing a version tag such as `v0.1.0` also publishes a GitHub Release with that ZIP attached and generated release notes. The tag supplies the version in the packaged `__init__.py` and the ZIP filename. Release tags must use `vMAJOR.MINOR.PATCH`. You do not need to update the source version before tagging. The source files and Git history stay unchanged. Other tags only build the plugin. The workflow runs the packaging tests and checks Python syntax; it does not run the Calibre integration tests.
+GitHub Actions runs the same build on every push, pull request and manual run, then uploads the ZIP as a workflow artifact. Pushing a version tag such as `v0.1.0` also publishes a GitHub Release with that ZIP attached and generated release notes. The tag supplies the version in the packaged `__init__.py` and the ZIP filename. Release tags accept `vMAJOR.MINOR` or `vMAJOR.MINOR.PATCH`. For example, `v0.3` packages plugin version `0.3.0`; Calibre stores versions as three numbers. You do not need to update the source version before tagging. The source files and Git history stay unchanged. Other tags only build the plugin. The workflow runs the packaging tests and checks Python syntax; it does not run the Calibre integration tests.
 
 To release a version, commit and push the changes you want to release. Then create and push a version tag:
 

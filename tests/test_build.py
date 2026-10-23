@@ -33,8 +33,15 @@ class BuildTests(unittest.TestCase):
         for name, source in FILES.items():
             self.assertEqual(source.read_bytes(), originals[name])
 
+    def test_two_part_release_tag_defaults_patch_to_zero(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = build(Path(folder), release_tag='v0.3')
+            self.assertEqual(output.name, 'Metadata-Audit-0.3.0.zip')
+            with ZipFile(output) as archive:
+                self.assertEqual(plugin_version(archive.read('__init__.py')), '0.3.0')
+
     def test_invalid_release_tags_are_rejected_without_build_outputs(self):
-        for tag in ('', '0.1.0', 'v1.2', 'v01.2.3', 'v1.2.3-rc1', 'v1.2.3+build', 'v1.2.3\n', 'v1.2.3;echo bad'):
+        for tag in ('', '0.1.0', 'v1', 'v1.2.', 'v01.2.3', 'v1.2.3-rc1', 'v1.2.3+build', 'v1.2.3\n', 'v1.2.3;echo bad'):
             with self.subTest(tag=tag), tempfile.TemporaryDirectory() as folder:
                 with self.assertRaisesRegex(ValueError, 'Release tags must use'):
                     build(Path(folder), release_tag=tag)

@@ -44,10 +44,10 @@ def plugin_version(source=None):
 
 
 def release_source(source, tag):
-    match = re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag)
+    match = re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*))?', tag)
     if match is None:
-        raise ValueError('Release tags must use vMAJOR.MINOR.PATCH, for example v0.1.0.')
-    version = tuple(int(part) for part in match.groups())
+        raise ValueError('Release tags must use vMAJOR.MINOR or vMAJOR.MINOR.PATCH, for example v0.3 or v0.3.1.')
+    version = tuple(int(part) if part is not None else 0 for part in match.groups())
     node = version_expression(source)
     # AST columns are UTF-8 byte offsets. Preserve the rest of the source exactly.
     lines = source.splitlines(keepends=True)
@@ -95,6 +95,6 @@ def build(output_dir, release_tag=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dist')
-    parser.add_argument('--release-tag', help='Set the packaged plugin version from a vMAJOR.MINOR.PATCH tag.')
+    parser.add_argument('--release-tag', help='Set the packaged plugin version from a vMAJOR.MINOR or vMAJOR.MINOR.PATCH tag.')
     args = parser.parse_args()
     print(build(args.output_dir, release_tag=args.release_tag))
