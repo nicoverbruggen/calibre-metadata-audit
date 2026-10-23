@@ -37,7 +37,7 @@ Applying runs in the background and shows progress. **Stop after current book** 
 
 The plugin updates the current EPUB stored in Calibre. It does not update separate exported copies or books already on a device. It does not change Calibre's title, author, series or publisher values.
 
-Only the EPUB package metadata is rewritten. Covers, illustrations and story files are preserved. Explicit translator and illustrator roles are preserved. The plugin checks the rewritten archive and verifies that every other archive entry is unchanged before saving it through Calibre's database API.
+Only the EPUB package metadata is rewritten. Unchanged ZIP entries are copied in compressed form, so covers and illustrations do not need to be recompressed. Covers, illustrations and story files are preserved. Explicit translator and illustrator roles are preserved. The plugin checks the rewritten archive and verifies that every other archive entry is unchanged before saving it through Calibre's database API.
 
 No `ORIGINAL_EPUB` backup is created. Existing backups are left alone and are not used as the source. Keep your own library backup or try the plugin on a disposable library first.
 

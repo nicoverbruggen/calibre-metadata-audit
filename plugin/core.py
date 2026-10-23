@@ -260,11 +260,16 @@ def rewrite(data, target, fields):
         if x.get('property') == 'dcterms:modified':
             x.text = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     updated = etree.tostring(root, encoding='utf-8', xml_declaration=True)
+    from calibre.utils.zipfile import ZipFile as RawZipFile
     output = BytesIO()
-    with ZipFile(BytesIO(data)) as source, ZipFile(output, 'w') as dest:
+    # Calibre can copy compressed entries directly. Recompress only the package.
+    with RawZipFile(BytesIO(data)) as source, RawZipFile(output, 'w') as dest:
         dest.comment = source.comment
         for info in source.infolist():
-            dest.writestr(info, updated if info.filename == path else source.read(info))
+            if info.filename == path:
+                dest.writestr(info, updated)
+            else:
+                dest.writestr(info, source.read_raw(info), raw_bytes=True)
     answer = output.getvalue()
     # Verify every member, including covers and artwork, before replacing a format.
     with ZipFile(BytesIO(data)) as source, ZipFile(BytesIO(answer)) as dest:
