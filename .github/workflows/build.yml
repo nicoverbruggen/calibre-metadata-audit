@@ -1,0 +1,29 @@
+name: Build plugin
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build and verify installable ZIP
+        run: python3 tools/build_plugin.py
+
+      - name: Upload plugin ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Metadata-Audit
+          path: dist/Metadata-Audit-*.zip
+          if-no-files-found: error
+          compression-level: 0
