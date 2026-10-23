@@ -7,6 +7,6 @@ class MetadataAuditPlugin(InterfaceActionBase):
     description = 'Compare EPUB metadata with Calibre and apply selected corrections.'
     supported_platforms = ['windows', 'osx', 'linux']
     author = 'Nico Verbruggen'
-    version = (0, 2, 0)
+    version = (0, 2, 1)
     minimum_calibre_version = (7, 0, 0)
     actual_plugin = 'calibre_plugins.metadata_audit.ui:MetadataAuditAction'

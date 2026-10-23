@@ -16,7 +16,7 @@ A difference is not proof of a mistake. The plugin treats Calibre's database as 
 1. Download an installable `Metadata-Audit-<version>.zip` from a GitHub release, when available. Do not use GitHub's automatic source-code ZIP.
 2. In Calibre, open **Preferences → Plugins → Load plugin from file** and select the plugin ZIP.
 3. Restart Calibre.
-4. Open **Preferences → Toolbars & menus** and add **Metadata Audit** to the main toolbar.
+4. **Metadata Audit** appears on the main toolbar automatically on its first startup, including when a device is connected. You can move or remove it through **Preferences → Toolbars & menus**. Later restarts preserve your changes.
 
 For a CI build, open a successful **Build plugin** workflow run in GitHub Actions and download the **Metadata-Audit** artifact. Extract the downloaded artifact once to get the installable plugin ZIP inside. Keep that inner ZIP intact when installing it in Calibre.
 

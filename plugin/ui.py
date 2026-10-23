@@ -7,6 +7,7 @@ from qt.core import (
     QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QThread, QTimer,
     Qt, QVBoxLayout, pyqtSignal,
 )
+from calibre.gui2 import gprefs
 from calibre.gui2.actions import InterfaceAction
 
 from calibre_plugins.metadata_audit.core import (
@@ -46,6 +47,22 @@ class MetadataAuditAction(InterfaceAction):
 
     def genesis(self):
         self.qaction.triggered.connect(self.open_audit)
+
+    def gui_layout_complete(self):
+        if gprefs.get('metadata-audit-toolbar-configured', False):
+            return
+        changed = False
+        with gprefs:
+            for key in ('action-layout-toolbar', 'action-layout-toolbar-device'):
+                actions = list(gprefs[key])
+                if self.name not in actions:
+                    gprefs[key] = actions + [self.name]
+                    changed = True
+            # Run once so later user customizations, including removal, stay intact.
+            gprefs['metadata-audit-toolbar-configured'] = True
+        if changed:
+            self.gui.bars_manager.init_bars()
+            self.gui.bars_manager.update_bars()
 
     def open_audit(self):
         if self.gui.current_view() is not self.gui.library_view:
