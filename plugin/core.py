@@ -6,8 +6,11 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from io import BytesIO
+import os
+from pathlib import Path
 import posixpath
 import re
+import tempfile
 import unicodedata
 from urllib.parse import unquote
 from zipfile import ZipFile
@@ -297,17 +300,95 @@ def read_for_update(db, book_id, expected_hash, target):
     return data
 
 
-def save_to_database(db, book_id, expected_hash, target, updated):
-    """Recheck the snapshot and save through Calibre, on the coordinating thread."""
-    read_for_update(db, book_id, expected_hash, target)
-    if not db.add_format(book_id, 'EPUB', BytesIO(updated), replace=True, run_hooks=False):
-        raise ValueError('Calibre did not replace the EPUB.')
-    actual = db.format(book_id, 'EPUB')
-    if actual is None or fingerprint(actual) != fingerprint(updated):
-        raise ValueError('The saved EPUB could not be verified.')
+def _temporary_backup(book_id, original, expected_hash):
+    from calibre.constants import config_dir
+    directory = Path(config_dir) / 'metadata-audit-recovery'
+    directory.mkdir(mode=0o700, exist_ok=True)
+    backup = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=f'metadata-audit-book-{book_id}-', suffix='.epub',
+                                         dir=directory, delete=False) as stream:
+            backup = Path(stream.name)
+            stream.write(original)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if fingerprint(backup.read_bytes()) != expected_hash:
+            raise ValueError('The temporary backup could not be verified.')
+        return backup
+    except Exception:
+        if backup is not None:
+            backup.unlink(missing_ok=True)
+        raise
 
 
-def apply_to_database(db, book_id, expected_hash, target, fields):
+def _restore_backup(db, book_id, backup, expected_hash):
+    original = backup.read_bytes()
+    if fingerprint(original) != expected_hash:
+        raise ValueError('The temporary backup failed its checksum check.')
+    try:
+        current = db.format(book_id, 'EPUB')
+    except Exception:
+        current = None
+    if current is not None and fingerprint(current) == expected_hash:
+        return
+    if not db.add_format(book_id, 'EPUB', BytesIO(original), replace=True, run_hooks=False):
+        raise ValueError('Calibre did not restore the original EPUB.')
+    restored = db.format(book_id, 'EPUB')
+    if restored is None or fingerprint(restored) != expected_hash:
+        raise ValueError('The restored EPUB could not be verified.')
+
+
+def discard_backup(backup):
+    try:
+        backup.unlink()
+    except OSError as error:
+        return f'Temporary backup could not be deleted: {backup} ({error})'
+    return None
+
+
+def save_to_database(db, book_id, expected_hash, target, updated, *, temporary_backup=False, retained_backups=None):
+    """Recheck and save on the coordinating thread, with optional failure recovery."""
+    original = read_for_update(db, book_id, expected_hash, target)
+    backup = _temporary_backup(book_id, original, expected_hash) if temporary_backup else None
+    try:
+        if not db.add_format(book_id, 'EPUB', BytesIO(updated), replace=True, run_hooks=False):
+            raise ValueError('Calibre did not replace the EPUB.')
+        actual = db.format(book_id, 'EPUB')
+        if actual is None or fingerprint(actual) != fingerprint(updated):
+            raise ValueError('The saved EPUB could not be verified.')
+    except Exception as error:
+        if backup is None:
+            raise
+        try:
+            _restore_backup(db, book_id, backup, expected_hash)
+        except Exception as restore_error:
+            raise ValueError(f'Saving failed: {error}. Automatic restore failed: {restore_error}. '
+                             f'Backup path for manual recovery: {backup}') from error
+        warning = discard_backup(backup)
+        raise ValueError(f'Saving failed: {error}. Original EPUB restored and verified.'
+                         + (' ' + warning if warning else '')) from error
+    if backup is not None and retained_backups is not None:
+        retained_backups[book_id] = backup
+        return None
+    return discard_backup(backup) if backup is not None else None
+
+
+def validate_saved_book(db, book_id, expected_hash, fields):
+    """Read the saved EPUB again and compare selected fields with current Calibre values."""
+    data = db.format(book_id, 'EPUB')
+    if data is None:
+        raise ValueError('The saved EPUB cannot be read during final validation.')
+    target = target_metadata(db.get_metadata(book_id))
+    changed = [change for change in differences(data, target) if change['field'] in fields]
+    if changed:
+        details = '; '.join(f"{change['field']}: EPUB {change['epub']!r}, Calibre {change['database']!r}"
+                            for change in changed)
+        raise ValueError('Selected metadata differs from Calibre: ' + details)
+    if fingerprint(data) != expected_hash:
+        raise ValueError('The EPUB changed after saving. Review it before applying further updates.')
+
+
+def apply_to_database(db, book_id, expected_hash, target, fields, *, temporary_backup=False):
     data = read_for_update(db, book_id, expected_hash, target)
     updated = rewrite(data, target, fields)
-    save_to_database(db, book_id, expected_hash, target, updated)
+    return save_to_database(db, book_id, expected_hash, target, updated, temporary_backup=temporary_backup)

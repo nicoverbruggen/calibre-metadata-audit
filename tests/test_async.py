@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import patch
 import sys
+import tempfile
 import time
 import unittest
 
@@ -191,6 +192,113 @@ class AsyncTests(unittest.TestCase):
         self.assertEqual(db.writes, [1])
         self.assertIn('2 not processed', dialog.status.text())
         self.assertTrue(dialog.scan_library.isEnabled())
+        dialog.reject()
+
+    def test_stop_during_failed_save_waits_for_restore_and_skips_queued_books(self):
+        db, gui, dialog = self.make_dialog()
+        originals = dict(db.data)
+        original_write = db.add_format
+        first_write = True
+
+        def interrupted_write(book_id, fmt, stream, **kwargs):
+            nonlocal first_write
+            if first_write:
+                first_write = False
+                db.data[book_id] = b'partial EPUB'
+                db.started.set()
+                if not db.gate.wait(3):
+                    raise TimeoutError('Failed write was never released')
+                raise OSError('Interrupted save')
+            return original_write(book_id, fmt, stream, **kwargs)
+
+        with patch.object(db, 'add_format', side_effect=interrupted_write), patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'information'):
+            dialog.apply_checked()
+            pump_until(db.started.is_set)
+            dialog.stop_work()
+            db.gate.set()
+            pump_until(lambda: dialog.worker is None)
+        self.assertEqual(db.data, originals)
+        self.assertEqual(db.writes, [1])
+        self.assertEqual(len(dialog.errors), 1)
+        self.assertIn('Original EPUB restored and verified', dialog.errors[0])
+        self.assertIn('2 not processed', dialog.status.text())
+        dialog.reject()
+
+    def test_cleanup_warning_does_not_count_a_verified_update_as_failed(self):
+        db, gui, dialog = self.make_dialog()
+        db.gate.set()
+        original_save = ui.save_to_database
+
+        def cleanup_warning(*args, **kwargs):
+            original_save(*args, **kwargs)
+            return 'Temporary backup retained at a recovery path'
+
+        with patch.object(ui, 'save_to_database', side_effect=cleanup_warning), patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'information'):
+            dialog.apply_checked()
+            pump_until(lambda: dialog.worker is None)
+        self.assertIn('Updated 3 EPUBs. 0 failures.', dialog.status.text())
+        self.assertIn('3 warnings', dialog.status.text())
+        self.assertEqual(len(dialog.errors), 3)
+        self.assertTrue(dialog.error_button.isEnabled())
+        dialog.reject()
+
+    def test_final_validation_waits_for_all_saves_and_retains_flagged_original(self):
+        db, gui, dialog = self.make_dialog()
+        db.gate.set()
+        original_first = db.data[1]
+        original_write, original_validate = db.add_format, ui.validate_saved_book
+        checked = []
+
+        def later_edit(book_id, fmt, stream, **kwargs):
+            answer = original_write(book_id, fmt, stream, **kwargs)
+            if book_id == 3:
+                target = ui.target_metadata(db.get_metadata(1))
+                db.data[1] = ui.rewrite(db.data[1], dict(target, title='Later EPUB edit'), {'title'})
+            return answer
+
+        def final_check(*args):
+            self.assertEqual(db.writes, [1, 2, 3])
+            checked.append(args[1])
+            return original_validate(*args)
+
+        with tempfile.TemporaryDirectory() as settings, patch('calibre.constants.config_dir', settings), patch.object(db, 'add_format', side_effect=later_edit), patch.object(ui, 'validate_saved_book', side_effect=final_check), patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'information'):
+            dialog.apply_checked()
+            pump_until(lambda: dialog.worker is None)
+            recovery = list(Path(settings).rglob('*.epub'))
+            self.assertEqual(len(recovery), 1)
+            self.assertEqual(recovery[0].read_bytes(), original_first)
+            self.assertIn(str(recovery[0]), '\n'.join(dialog.errors))
+        self.assertEqual(checked, [1, 2, 3])
+        self.assertIn('Final validation: 2 passed, 1 discrepancies, 0 not checked', dialog.status.text())
+        self.assertTrue(dialog.error_button.isEnabled())
+        self.assertEqual(db.writes, [1, 2, 3])
+        self.assertIn(b'Later EPUB edit', db.data[1])
+        dialog.reject()
+
+    def test_stopping_validation_preserves_unchecked_recovery_copies(self):
+        db, gui, dialog = self.make_dialog()
+        db.gate.set()
+        started, release = Event(), Event()
+        validate = ui.validate_saved_book
+
+        def blocked_validation(*args):
+            started.set()
+            if not release.wait(3):
+                raise TimeoutError('Validation was never released')
+            return validate(*args)
+
+        with tempfile.TemporaryDirectory() as settings, patch('calibre.constants.config_dir', settings), patch.object(ui, 'validate_saved_book', side_effect=blocked_validation), patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'information'):
+            dialog.apply_checked()
+            try:
+                pump_until(started.is_set)
+                self.assertTrue(dialog.worker.verifying)
+                dialog.stop_work()
+            finally:
+                release.set()
+            pump_until(lambda: dialog.worker is None)
+            self.assertEqual(len(list(Path(settings).rglob('*.epub'))), 2)
+        self.assertEqual(db.writes, [1, 2, 3])
+        self.assertIn('Final validation: 1 passed, 0 discrepancies, 2 not checked', dialog.status.text())
         dialog.reject()
 
     def test_closing_waits_for_current_book_before_destroying_worker(self):

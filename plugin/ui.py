@@ -5,7 +5,7 @@ import os
 import traceback
 
 from qt.core import (
-    QAbstractItemView, QDialog, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
+    QAbstractItemView, QCheckBox, QDialog, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
     QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QThread, QTimer,
     Qt, QVBoxLayout, pyqtSignal,
 )
@@ -13,16 +13,24 @@ from calibre.gui2 import gprefs
 from calibre.gui2.actions import InterfaceAction
 
 from calibre_plugins.metadata_audit.core import (
-    differences, fingerprint, read_for_update, rewrite, save_to_database, target_metadata,
+    discard_backup, differences, fingerprint, read_for_update, rewrite, save_to_database,
+    target_metadata, validate_saved_book,
 )
 
 
 class ApplyWorker(QThread):
     progress = pyqtSignal(int, int, str)
+    validation_progress = pyqtSignal(int, int, str)
 
-    def __init__(self, db, jobs, parent=None):
+    def __init__(self, db, jobs, parent=None, *, temporary_backup=False):
         super().__init__(parent)
         self.db, self.jobs = db, jobs
+        self.temporary_backup = temporary_backup
+        self.warnings = []
+        self.backups = {}
+        self.verified, self.validation_errors = [], []
+        self.validation_processed = 0
+        self.verifying = False
         self.done, self.errors = [], []
         self.processed = 0
         self.cancelled = False
@@ -33,6 +41,7 @@ class ApplyWorker(QThread):
         workers = max(1, min(4, (os.cpu_count() or 1) // 2))
         jobs = iter(self.jobs)
         pending = deque()
+        saved = []
         with ThreadPoolExecutor(max_workers=workers) as executor:
             try:
                 while not self.isInterruptionRequested():
@@ -55,8 +64,12 @@ class ApplyWorker(QThread):
                     self.progress.emit(self.processed, len(self.jobs), target['title'])
                     try:
                         updated = future.result()
-                        save_to_database(self.db, book_id, digest, target, updated)
+                        warning = save_to_database(self.db, book_id, digest, target, updated,
+                                                   temporary_backup=self.temporary_backup, retained_backups=self.backups)
+                        if warning:
+                            self.warnings.append(f'Book {book_id}: {warning}')
                         self.done.append(book_id)
+                        saved.append((book_id, fields, fingerprint(updated), target['title']))
                     except Exception:
                         self.errors.append(f'Book {book_id}:\n{traceback.format_exc()}')
                     finally:
@@ -67,6 +80,27 @@ class ApplyWorker(QThread):
                 for _, future in pending:
                     future.cancel()
         self.cancelled = self.processed < len(self.jobs)
+        self.verifying = True
+        for book_id, fields, digest, title in saved:
+            if self.isInterruptionRequested():
+                break
+            self.validation_progress.emit(self.validation_processed, len(saved), title)
+            try:
+                validate_saved_book(self.db, book_id, digest, fields)
+            except Exception:
+                self.validation_errors.append(f'Book {book_id}, final validation:\n{traceback.format_exc()}')
+            else:
+                self.verified.append(book_id)
+                backup = self.backups.pop(book_id, None)
+                if backup is not None:
+                    warning = discard_backup(backup)
+                    if warning:
+                        self.warnings.append(f'Book {book_id}: {warning}')
+            self.validation_processed += 1
+            self.validation_progress.emit(self.validation_processed, len(saved), title)
+        for book_id, backup in self.backups.items():
+            self.warnings.append(f'Book {book_id}: final validation did not pass or was not completed. '
+                                 f'Recovery copy retained at: {backup}')
 
 
 class MetadataAuditAction(InterfaceAction):
@@ -129,6 +163,11 @@ class AuditDialog(QDialog):
             buttons.addWidget(button)
         buttons.addStretch()
         layout.addLayout(buttons)
+        self.temporary_backup = QCheckBox('Temporary backup and restore on failure')
+        self.temporary_backup.setChecked(True)
+        self.temporary_backup.setToolTip('Verify an original copy before saving. Restore it if saving fails. '
+                                         'Keep the copy until final validation passes.')
+        layout.addWidget(self.temporary_backup)
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(['Apply', 'ID', 'Book', 'Field', 'Calibre database', 'Inside EPUB'])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -150,7 +189,7 @@ class AuditDialog(QDialog):
         footer = QHBoxLayout()
         self.select_all = QPushButton('Check all differences')
         self.select_none = QPushButton('Uncheck all')
-        self.error_button = QPushButton('Show scan errors')
+        self.error_button = QPushButton('Show errors and warnings')
         self.error_button.setEnabled(False)
         self.apply_button = QPushButton('Apply checked differences')
         self.apply_button.setEnabled(False)
@@ -196,7 +235,7 @@ class AuditDialog(QDialog):
         self.timer.start(0)
 
     def set_busy(self, busy):
-        for button in (self.scan_selected, self.scan_library, self.select_all, self.select_none):
+        for button in (self.scan_selected, self.scan_library, self.select_all, self.select_none, self.temporary_backup):
             button.setEnabled(not busy)
         self.stop.setEnabled(busy)
         self.table.setEnabled(not busy)
@@ -252,7 +291,9 @@ class AuditDialog(QDialog):
         if self.worker is not None:
             self.worker.requestInterruption()
             self.stop.setEnabled(False)
-            self.status.setText('Stopping after the current book. Completed changes will be kept.')
+            self.status.setText('Stopping after the current validation. Unchecked recovery copies will be kept.'
+                                if self.worker.verifying else
+                                'Stopping after the current book. Completed changes and recovery copies will be kept.')
         else:
             self.stop_scan()
 
@@ -277,10 +318,12 @@ class AuditDialog(QDialog):
         if not chosen:
             return
         count = sum(len(fields) for fields in chosen.values())
+        backup_notice = ('A verified temporary original will be saved before each replacement and restored if saving fails.'
+                         if self.temporary_backup.isChecked() else 'Temporary backup and automatic restore are disabled.')
         answer = QMessageBox.question(self, 'Apply metadata changes',
             f'Copy {count} checked fields from Calibre into {len(chosen)} EPUBs?\n\n'
             'This replaces the current EPUB files without creating ORIGINAL_EPUB backups. '
-            'Existing backups are left alone. Covers and story content stay unchanged.',
+            'Existing backups are left alone. Covers and story content stay unchanged.\n\n' + backup_notice,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -288,8 +331,9 @@ class AuditDialog(QDialog):
         for book_id, fields in chosen.items():
             digest, target = self.snapshots[book_id]
             jobs.append((book_id, frozenset(fields), digest, target))
-        self.worker = ApplyWorker(self.db, jobs, self)
+        self.worker = ApplyWorker(self.db, jobs, self, temporary_backup=self.temporary_backup.isChecked())
         self.worker.progress.connect(self.apply_progress)
+        self.worker.validation_progress.connect(self.validation_progress)
         self.worker.finished.connect(self.apply_finished)
         self.progress.setRange(0, len(jobs))
         self.progress.setValue(0)
@@ -309,37 +353,51 @@ class AuditDialog(QDialog):
         else:
             self.status.setText(f'Applying {processed}/{total} EPUBs: {title}')
 
+    def validation_progress(self, processed, total, title):
+        if self.worker is None:
+            return
+        self.progress.setRange(0, total)
+        self.progress.setValue(processed)
+        self.stop.setText('Stop validation')
+        self.status.setText(f'Validating {processed}/{total} saved EPUBs: {title}')
+
     def apply_finished(self):
         worker = self.worker
         if worker is None:
             return
-        done, errors = worker.done, worker.errors
+        done, errors, warnings = worker.done, worker.errors, worker.warnings
+        validation_errors = worker.validation_errors
+        verified = len(worker.verified)
+        unchecked = len(done) - worker.validation_processed
         skipped = len(worker.jobs) - worker.processed
         self.worker = None
         worker.deleteLater()
         self.stop.setText('Stop')
         if done:
             self.gui.library_view.model().refresh_ids(done)
-        if errors:
-            self.errors.extend(errors)
+        if errors or warnings or validation_errors:
+            self.errors.extend(errors + warnings + validation_errors)
             self.error_button.setEnabled(True)
         result = f'Updated {len(done)} EPUBs. {len(errors)} failures. {skipped} not processed.'
+        result += f' Final validation: {verified} passed, {len(validation_errors)} discrepancies, {unchecked} not checked.'
+        if warnings:
+            result += f' {len(warnings)} warnings.'
         # Old checkboxes and hashes must not be reused after a partial or complete write.
         self.table.setRowCount(0)
         self.rows, self.snapshots = [], {}
         self.set_busy(False)
-        self.status.setText(result + ' Scan again to check the files.')
+        self.status.setText(result)
         if self.close_when_finished:
             super().reject()
         else:
             QMessageBox.information(self, 'Metadata Audit', result
-                + '\nScan again to see the remaining differences.'
-                + (' Use Show scan errors for details.' if errors else ''))
+                + '\nFinal validation checks the fields you selected. Scan again to review other differences.'
+                + (' Use Show errors and warnings for details.' if errors or warnings or validation_errors else ''))
 
     def show_errors(self):
         dialog = QMessageBox(self)
-        dialog.setWindowTitle('Metadata Audit errors')
-        dialog.setText(f'{len(self.errors)} errors. Other books can still be reviewed.')
+        dialog.setWindowTitle('Metadata Audit details')
+        dialog.setText(f'{len(self.errors)} errors or warnings. Other books can still be reviewed.')
         dialog.setDetailedText('\n\n'.join(self.errors))
         dialog.exec()
 

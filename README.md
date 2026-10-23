@@ -28,10 +28,10 @@ The plugin has been tested with Calibre 9.17.0 on macOS. It declares Calibre 7.0
 2. Scan selected books or the whole library.
 3. Compare the **Calibre database** and **Inside EPUB** columns. Hover over a value to read it in full.
 4. Check the individual fields you want to change. Nothing is checked by default.
-5. Click **Apply checked differences** and confirm the changes.
-6. Scan again to check the updated files.
+5. Leave **Temporary backup and restore on failure** enabled to protect each replacement, or uncheck it to skip temporary backups. Click **Apply checked differences** and confirm the changes.
+6. Read the final validation result. Use **Show errors and warnings** for discrepancies. Scan again if you want to review other fields.
 
-Applying runs in the background and shows progress. EPUB preparation uses up to half the detected CPU cores, capped at four workers. Calibre reads and writes stay on one coordinating thread. Only a bounded number of books are prepared at once, and each file is checked again before saving. **Stop after current book** keeps completed changes and skips the remaining books. Closing the dialog during an apply also waits for the current book to finish.
+Applying runs in the background and shows progress. EPUB preparation uses up to half the detected CPU cores, capped at four workers. Calibre reads and writes stay on one coordinating thread. Only a bounded number of books are prepared at once, and each file is checked again before saving. **Stop after current book** keeps completed changes and skips the remaining books. Closing the dialog during an apply also waits for the current book to finish. After saving, a separate validation pass rereads each updated EPUB. It compares the selected fields with the current database and checks that the saved bytes still match the verified output. Discrepancies are flagged without changing the file. Unselected field differences are not treated as validation failures. The result reports passed, flagged and unchecked books.
 
 ## File handling
 
@@ -39,9 +39,11 @@ The plugin updates the current EPUB stored in Calibre. It does not update separa
 
 Only the EPUB package metadata is rewritten. Unchanged ZIP entries are copied in compressed form, so covers and illustrations do not need to be recompressed. Covers, illustrations and story files are preserved. Explicit translator and illustrator roles are preserved. The plugin checks the rewritten archive and verifies that every other archive entry is unchanged before saving it through Calibre's database API.
 
-No `ORIGINAL_EPUB` backup is created. Existing backups are left alone and are not used as the source. Keep your own library backup or try the plugin on a disposable library first.
+Temporary backup and restore is enabled by default. Before replacing each EPUB, the plugin writes the original to a private file in the `metadata-audit-recovery` folder inside Calibre's settings directory, flushes it to disk and verifies its checksum. A failed save or readback check triggers restoration through Calibre, followed by verification of the restored file. Backups are deleted after final validation passes or after a verified restoration. If restoration cannot be verified, final validation flags a discrepancy, or validation is stopped before checking a book, its backup stays in place and its path is shown in **Show errors and warnings**. A cleanup failure is reported as a warning and does not undo a successful update.
 
-If the EPUB or its Calibre metadata changes after a scan, the plugin refuses that update and asks you to scan again. Per-book failures are available through **Show scan errors**. Other selected books can still be processed.
+No `ORIGINAL_EPUB` backup is created. Existing backups are left alone and are not used as the source. Retained recovery copies survive a normal Calibre restart. Automatic restoration does not run after a crash or power failure. If a recovery copy remains, use it for manual recovery. This feature does not guarantee recovery from those events and is not a complete library backup. Keep your own library backup or try the plugin on a disposable library first.
+
+If the EPUB or its Calibre metadata changes after a scan, the plugin refuses that update and asks you to scan again. Per-book failures are available through **Show errors and warnings**. Other selected books can still be processed.
 
 ## Repository layout
 

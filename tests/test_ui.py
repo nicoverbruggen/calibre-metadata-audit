@@ -7,6 +7,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from test_core import fixture
 import calibre.customize.ui
+from calibre_plugins.metadata_audit import core as plugin_core
 from calibre_plugins.metadata_audit.ui import AuditDialog
 from qt.core import QApplication, QMainWindow, QMessageBox, Qt
 def require(condition, message="Verification failed"):
@@ -51,6 +52,7 @@ gui = QMainWindow()
 gui.current_db = SimpleNamespace(new_api=db)
 gui.library_view = SimpleNamespace(get_selected_ids=lambda: [1], model=lambda: SimpleNamespace(refresh_ids=lambda ids: None))
 dialog = AuditDialog(gui)
+require(dialog.temporary_backup.isChecked(), 'Recovery must default to enabled')
 dialog.start_selected()
 while dialog.timer.isActive():
     app.processEvents()
@@ -66,10 +68,13 @@ require(dialog.apply_button.isEnabled())
 with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.No):
     dialog.apply_checked()
 require(db.writes == 0)
-with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'information'):
+dialog.temporary_backup.setChecked(False)
+with patch.object(plugin_core, '_temporary_backup', side_effect=AssertionError('Disabled backup was invoked')), patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'information'):
     dialog.apply_checked()
     wait_for_apply(dialog)
 require(db.writes == 1)
+require(dialog.errors == [], 'Selected-field final validation unexpectedly failed')
+require('Final validation: 1 passed, 0 discrepancies, 0 not checked' in dialog.status.text())
 require(b'Mary Zaia' not in db.data)
 require(b'Old title' in db.data)
 require(not dialog.apply_button.isEnabled())
