@@ -31,7 +31,7 @@ The plugin has been tested with Calibre 9.17.0 on macOS. It declares Calibre 7.0
 5. Click **Apply checked differences** and confirm the changes.
 6. Scan again to check the updated files.
 
-Applying runs in the background and shows progress. **Stop after current book** keeps completed changes and skips the remaining books. Closing the dialog during an apply also waits for the current book to finish.
+Applying runs in the background and shows progress. EPUB preparation uses up to half the detected CPU cores, capped at four workers. Calibre reads and writes stay on one coordinating thread. Only a bounded number of books are prepared at once, and each file is checked again before saving. **Stop after current book** keeps completed changes and skips the remaining books. Closing the dialog during an apply also waits for the current book to finish.
 
 ## File handling
 

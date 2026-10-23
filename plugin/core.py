@@ -288,16 +288,26 @@ def fingerprint(data):
     return sha256(data).hexdigest()
 
 
-def apply_to_database(db, book_id, expected_hash, target, fields):
-    """Use Calibre's API so its format cache stays consistent with the file."""
+def read_for_update(db, book_id, expected_hash, target):
     if target_metadata(db.get_metadata(book_id)) != target:
         raise ValueError('Calibre metadata changed. Scan again before applying.')
     data = db.format(book_id, 'EPUB')
     if data is None or fingerprint(data) != expected_hash:
         raise ValueError('The EPUB changed. Scan again before applying.')
-    updated = rewrite(data, target, fields)
+    return data
+
+
+def save_to_database(db, book_id, expected_hash, target, updated):
+    """Recheck the snapshot and save through Calibre, on the coordinating thread."""
+    read_for_update(db, book_id, expected_hash, target)
     if not db.add_format(book_id, 'EPUB', BytesIO(updated), replace=True, run_hooks=False):
         raise ValueError('Calibre did not replace the EPUB.')
     actual = db.format(book_id, 'EPUB')
     if actual is None or fingerprint(actual) != fingerprint(updated):
         raise ValueError('The saved EPUB could not be verified.')
+
+
+def apply_to_database(db, book_id, expected_hash, target, fields):
+    data = read_for_update(db, book_id, expected_hash, target)
+    updated = rewrite(data, target, fields)
+    save_to_database(db, book_id, expected_hash, target, updated)

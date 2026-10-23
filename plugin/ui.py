@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
-from collections import defaultdict
+from collections import defaultdict, deque
+from concurrent.futures import Future, ThreadPoolExecutor
+import os
 import traceback
 
 from qt.core import (
@@ -11,7 +13,7 @@ from calibre.gui2 import gprefs
 from calibre.gui2.actions import InterfaceAction
 
 from calibre_plugins.metadata_audit.core import (
-    apply_to_database, differences, fingerprint, target_metadata,
+    differences, fingerprint, read_for_update, rewrite, save_to_database, target_metadata,
 )
 
 
@@ -26,17 +28,44 @@ class ApplyWorker(QThread):
         self.cancelled = False
 
     def run(self):
-        for book_id, fields, digest, target in self.jobs:
-            if self.isInterruptionRequested():
-                break
-            self.progress.emit(self.processed, len(self.jobs), target['title'])
+        # Bound both active rewrites and queued EPUB buffers. Calibre access stays
+        # on this thread; pool workers only receive bytes and metadata snapshots.
+        workers = max(1, min(4, (os.cpu_count() or 1) // 2))
+        jobs = iter(self.jobs)
+        pending = deque()
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             try:
-                apply_to_database(self.db, book_id, digest, target, fields)
-                self.done.append(book_id)
-            except Exception:
-                self.errors.append(f'Book {book_id}:\n{traceback.format_exc()}')
-            self.processed += 1
-            self.progress.emit(self.processed, len(self.jobs), target['title'])
+                while not self.isInterruptionRequested():
+                    while len(pending) < workers and not self.isInterruptionRequested():
+                        job = next(jobs, None)
+                        if job is None:
+                            break
+                        book_id, fields, digest, target = job
+                        try:
+                            data = read_for_update(self.db, book_id, digest, target)
+                            future = executor.submit(rewrite, data, target, fields)
+                            del data
+                        except Exception as error:
+                            future = Future()
+                            future.set_exception(error)
+                        pending.append((job, future))
+                    if not pending:
+                        break
+                    (book_id, fields, digest, target), future = pending.popleft()
+                    self.progress.emit(self.processed, len(self.jobs), target['title'])
+                    try:
+                        updated = future.result()
+                        save_to_database(self.db, book_id, digest, target, updated)
+                        self.done.append(book_id)
+                    except Exception:
+                        self.errors.append(f'Book {book_id}:\n{traceback.format_exc()}')
+                    finally:
+                        updated = future = None
+                    self.processed += 1
+                    self.progress.emit(self.processed, len(self.jobs), target['title'])
+            finally:
+                for _, future in pending:
+                    future.cancel()
         self.cancelled = self.processed < len(self.jobs)
 
 

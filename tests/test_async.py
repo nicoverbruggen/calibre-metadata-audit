@@ -1,5 +1,6 @@
 from pathlib import Path
-from threading import Event
+from threading import Barrier, Event, get_ident
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import patch
 import sys
@@ -10,6 +11,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from test_core import fixture
 import calibre.customize.ui
+from calibre_plugins.metadata_audit import ui
 from calibre_plugins.metadata_audit.ui import AuditDialog
 from qt.core import QApplication, QMainWindow, QMessageBox, QTimer
 
@@ -87,6 +89,96 @@ class AsyncTests(unittest.TestCase):
         self.assertTrue(dialog.scan_library.isEnabled())
         self.assertFalse(dialog.apply_button.isEnabled())
         dialog.reject()
+
+    def test_rewrites_overlap_and_database_calls_stay_on_one_thread(self):
+        db, gui, dialog = self.make_dialog()
+        db.gate.set()
+        barrier = Barrier(3)
+        rewrite_threads, database_threads = set(), set()
+        original_rewrite = ui.rewrite
+
+        def concurrent_rewrite(*args):
+            rewrite_threads.add(get_ident())
+            barrier.wait(timeout=3)
+            return original_rewrite(*args)
+
+        def record(method):
+            def call(*args, **kwargs):
+                database_threads.add(get_ident())
+                return method(*args, **kwargs)
+            return call
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(ui.os, 'cpu_count', return_value=8))
+            stack.enter_context(patch.object(ui, 'rewrite', side_effect=concurrent_rewrite))
+            for name in ('get_metadata', 'format', 'add_format'):
+                stack.enter_context(patch.object(db, name, side_effect=record(getattr(db, name))))
+            stack.enter_context(patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes))
+            stack.enter_context(patch.object(QMessageBox, 'information'))
+            dialog.apply_checked()
+            pump_until(lambda: dialog.worker is None)
+        self.assertEqual(dialog.errors, [])
+        self.assertEqual(len(rewrite_threads), 3)
+        self.assertEqual(len(database_threads), 1)
+        self.assertTrue(rewrite_threads.isdisjoint(database_threads))
+        self.assertNotIn(get_ident(), database_threads)
+        self.assertEqual(db.writes, [1, 2, 3])
+        dialog.reject()
+
+    def test_failed_preparation_does_not_abort_other_books(self):
+        db, gui, dialog = self.make_dialog()
+        db.gate.set()
+        original_rewrite = ui.rewrite
+
+        def fail_second(data, target, fields):
+            if target['series_index'] == '2':
+                raise ValueError('Deliberate preparation failure')
+            return original_rewrite(data, target, fields)
+
+        with patch.object(ui, 'rewrite', side_effect=fail_second), patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), patch.object(QMessageBox, 'information'):
+            dialog.apply_checked()
+            pump_until(lambda: dialog.worker is None)
+        self.assertEqual(db.writes, [1, 3])
+        self.assertEqual(len(dialog.errors), 1)
+        self.assertIn('Deliberate preparation failure', dialog.errors[0])
+        dialog.reject()
+
+    def test_large_cpu_count_does_not_prefetch_more_than_four_books(self):
+        db = Database()
+        for book_id in (4, 5, 6):
+            db.data[book_id] = db.data[1]
+        db.gate.set()
+        jobs = [(book_id, frozenset({'title'}), ui.fingerprint(data), ui.target_metadata(db.get_metadata(book_id)))
+                for book_id, data in db.data.items()]
+        release = Event()
+        started = set()
+        reads = []
+        original_rewrite, original_format = ui.rewrite, db.format
+
+        def blocked_rewrite(data, target, fields):
+            started.add(target['series_index'])
+            if not release.wait(3):
+                raise TimeoutError('Preparation was never released')
+            return original_rewrite(data, target, fields)
+
+        def record_read(book_id, fmt):
+            reads.append(book_id)
+            return original_format(book_id, fmt)
+
+        worker = ui.ApplyWorker(db, jobs)
+        try:
+            with patch.object(ui.os, 'cpu_count', return_value=128), patch.object(ui, 'rewrite', side_effect=blocked_rewrite), patch.object(db, 'format', side_effect=record_read):
+                worker.start()
+                pump_until(lambda: len(started) == 4)
+                self.assertEqual(reads, [1, 2, 3, 4])
+                self.assertEqual(db.writes, [])
+                release.set()
+                pump_until(lambda: not worker.isRunning())
+            self.assertEqual(worker.errors, [])
+            self.assertEqual(worker.done, [1, 2, 3, 4, 5, 6])
+        finally:
+            release.set()
+            worker.wait()
 
     def test_stop_keeps_current_book_and_skips_remaining_books(self):
         db, gui, dialog = self.make_dialog()

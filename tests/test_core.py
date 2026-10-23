@@ -6,6 +6,8 @@ from io import BytesIO
 from types import SimpleNamespace
 from zipfile import ZipFile, ZIP_STORED
 import warnings
+from unittest.mock import patch
+import core
 
 from core import NS, apply_to_database, archive_metadata, differences, fingerprint, read_values, rewrite
 
@@ -134,6 +136,37 @@ class CoreTests(unittest.TestCase):
             apply_to_database(db, 1, 'stale', TARGET, {'title'})
         with self.assertRaisesRegex(ValueError, 'metadata changed'):
             apply_to_database(db, 1, fingerprint(source), dict(TARGET, title='Outdated'), {'title'})
+        self.assertFalse(db.wrote)
+
+    def test_changed_epub_during_preparation_is_rejected_before_save(self):
+        source = fixture('<dc:title>Old</dc:title>')
+        newer = fixture('<dc:title>Newer edit</dc:title>')
+
+        class Database:
+            data = source
+            wrote = False
+
+            def get_metadata(self, book_id):
+                return SimpleNamespace(title=TARGET['title'], authors=TARGET['authors'], publisher=TARGET['publisher'], series=TARGET['series'], series_index=2.5)
+
+            def format(self, book_id, fmt):
+                return self.data
+
+            def add_format(self, *args, **kwargs):
+                self.wrote = True
+
+        db = Database()
+        original_rewrite = core.rewrite
+
+        def concurrent_change(*args):
+            answer = original_rewrite(*args)
+            db.data = newer
+            return answer
+
+        with patch.object(core, 'rewrite', side_effect=concurrent_change):
+            with self.assertRaisesRegex(ValueError, 'EPUB changed'):
+                apply_to_database(db, 1, fingerprint(source), TARGET, {'title'})
+        self.assertEqual(db.data, newer)
         self.assertFalse(db.wrote)
 
 
