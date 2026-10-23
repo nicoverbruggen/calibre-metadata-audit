@@ -4,6 +4,7 @@
 import argparse
 import ast
 from pathlib import Path
+import re
 import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -18,8 +19,8 @@ FILES = {
 }
 
 
-def plugin_version():
-    tree = ast.parse(FILES['__init__.py'].read_text(encoding='utf-8'))
+def version_expression(source):
+    tree = ast.parse(source)
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and node.name == 'MetadataAuditPlugin':
             for statement in node.body:
@@ -27,16 +28,35 @@ def plugin_version():
                     isinstance(target, ast.Name) and target.id == 'version'
                     for target in statement.targets
                 ):
-                    value = ast.literal_eval(statement.value)
-                    if not isinstance(value, tuple) or len(value) != 3 or any(
-                        type(part) is not int or part < 0 for part in value
-                    ):
-                        raise ValueError('Plugin version must contain three non-negative integers.')
-                    return '.'.join(str(part) for part in value)
+                    return statement.value
     raise ValueError('Plugin version was not found.')
 
 
-def build(output_dir):
+def plugin_version(source=None):
+    if source is None:
+        source = FILES['__init__.py'].read_bytes()
+    value = ast.literal_eval(version_expression(source))
+    if not isinstance(value, tuple) or len(value) != 3 or any(
+        type(part) is not int or part < 0 for part in value
+    ):
+        raise ValueError('Plugin version must contain three non-negative integers.')
+    return '.'.join(str(part) for part in value)
+
+
+def release_source(source, tag):
+    match = re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag)
+    if match is None:
+        raise ValueError('Release tags must use vMAJOR.MINOR.PATCH, for example v0.1.0.')
+    version = tuple(int(part) for part in match.groups())
+    node = version_expression(source)
+    # AST columns are UTF-8 byte offsets. Preserve the rest of the source exactly.
+    lines = source.splitlines(keepends=True)
+    start = sum(map(len, lines[:node.lineno - 1])) + node.col_offset
+    end = sum(map(len, lines[:node.end_lineno - 1])) + node.end_col_offset
+    return source[:start] + repr(version).encode('ascii') + source[end:]
+
+
+def build(output_dir, release_tag=None):
     payload = {}
     for name, path in FILES.items():
         if path.is_symlink():
@@ -44,10 +64,13 @@ def build(output_dir):
         payload[name] = path.read_bytes()
         if name.endswith('.py'):
             compile(payload[name], name, 'exec')
+    if release_tag is not None:
+        payload['__init__.py'] = release_source(payload['__init__.py'], release_tag)
+        compile(payload['__init__.py'], '__init__.py', 'exec')
     if payload['plugin-import-name-metadata_audit.txt']:
         raise ValueError('The plugin import marker must be empty.')
     output_dir.mkdir(parents=True, exist_ok=True)
-    output = output_dir / f'Metadata-Audit-{plugin_version()}.zip'
+    output = output_dir / f'Metadata-Audit-{plugin_version(payload["__init__.py"])}.zip'
     with tempfile.NamedTemporaryFile(dir=output_dir, suffix='.zip', delete=False) as temporary:
         temporary_path = Path(temporary.name)
     try:
@@ -72,5 +95,6 @@ def build(output_dir):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dist')
+    parser.add_argument('--release-tag', help='Set the packaged plugin version from a vMAJOR.MINOR.PATCH tag.')
     args = parser.parse_args()
-    print(build(args.output_dir))
+    print(build(args.output_dir, release_tag=args.release_tag))

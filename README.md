@@ -63,20 +63,20 @@ The build needs Python 3.10 or newer. It uses only the Python standard library a
 python3 tools/build_plugin.py
 ```
 
-The installable ZIP is written to `dist/`. The version comes from `plugin/__init__.py`. The archive includes only the plugin modules, its import marker, this README and the license. Tests, books, local settings and caches are excluded.
+The installable ZIP is written to `dist/`. For ordinary builds, the version comes from `plugin/__init__.py`. The archive includes only the plugin modules, its import marker, this README and the license. Tests, books, local settings and caches are excluded.
 
-GitHub Actions runs the same build on every push, pull request and manual run, then uploads the ZIP as a workflow artifact. Pushing a version tag such as `v0.2.0` also publishes a GitHub Release with that ZIP attached and generated release notes. The tag must match the version in `plugin/__init__.py`; a mismatch stops the release. Other tags only build the plugin. The workflow checks packaging and Python syntax; it does not run the Calibre integration tests.
+GitHub Actions runs the same build on every push, pull request and manual run, then uploads the ZIP as a workflow artifact. Pushing a version tag such as `v0.1.0` also publishes a GitHub Release with that ZIP attached and generated release notes. The tag supplies the version in the packaged `__init__.py` and the ZIP filename. Release tags must use `vMAJOR.MINOR.PATCH`. You do not need to update the source version before tagging. The source files and Git history stay unchanged. Other tags only build the plugin. The workflow runs the packaging tests and checks Python syntax; it does not run the Calibre integration tests.
 
-To release a version, update the plugin version, commit the change and push it. Then create and push the matching tag:
+To release a version, commit and push the changes you want to release. Then create and push a version tag:
 
 ```sh
-git tag -a v0.2.0 -m "Release 0.2.0"
-git push origin v0.2.0
+git tag -a v0.1.0 -m "Release 0.1.0"
+git push origin v0.1.0
 ```
 
 Use the new version number in both commands for later releases. Creating a local tag does not publish a release. Pushing the tag triggers publication after the build succeeds.
 
-The tests in `tests/` require Calibre's Python runtime. The UI tests also require the plugin to be installed in an isolated Calibre settings profile. Run them only with a disposable profile. The database integration test creates its own temporary library; it does not use your existing libraries.
+The packaging tests run with standard Python. The metadata and UI tests require Calibre's Python runtime. The UI tests also require the plugin to be installed in an isolated Calibre settings profile. Run them only with a disposable profile. The database integration test creates its own temporary library; it does not use your existing libraries.
 
 ## License
 
