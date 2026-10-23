@@ -20,6 +20,19 @@ jobs:
       - name: Build and verify installable ZIP
         run: python3 tools/build_plugin.py
 
+      - name: Verify release version
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          from tools.build_plugin import plugin_version
+          expected = 'v' + plugin_version()
+          if os.environ['RELEASE_TAG'] != expected:
+              raise SystemExit(f"Release tag must match the plugin version: {expected}")
+          PYTHON
+
       - name: Upload plugin ZIP
         uses: actions/upload-artifact@v4
         with:
@@ -27,3 +40,25 @@ jobs:
           path: dist/Metadata-Audit-*.zip
           if-no-files-found: error
           compression-level: 0
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download plugin ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: Metadata-Audit
+          path: dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/Metadata-Audit-*.zip \
+            --verify-tag --title "$RELEASE_TAG" --generate-notes

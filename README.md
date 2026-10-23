@@ -65,7 +65,16 @@ python3 tools/build_plugin.py
 
 The installable ZIP is written to `dist/`. The version comes from `plugin/__init__.py`. The archive includes only the plugin modules, its import marker, this README and the license. Tests, books, local settings and caches are excluded.
 
-GitHub Actions runs the same build on pushes, pull requests and manual runs, then uploads the ZIP as a workflow artifact. It does not create or publish GitHub releases. The workflow checks packaging and Python syntax; it does not run the Calibre integration tests.
+GitHub Actions runs the same build on every push, pull request and manual run, then uploads the ZIP as a workflow artifact. Pushing a version tag such as `v0.2.0` also publishes a GitHub Release with that ZIP attached and generated release notes. The tag must match the version in `plugin/__init__.py`; a mismatch stops the release. Other tags only build the plugin. The workflow checks packaging and Python syntax; it does not run the Calibre integration tests.
+
+To release a version, update the plugin version, commit the change and push it. Then create and push the matching tag:
+
+```sh
+git tag -a v0.2.0 -m "Release 0.2.0"
+git push origin v0.2.0
+```
+
+Use the new version number in both commands for later releases. Creating a local tag does not publish a release. Pushing the tag triggers publication after the build succeeds.
 
 The tests in `tests/` require Calibre's Python runtime. The UI tests also require the plugin to be installed in an isolated Calibre settings profile. Run them only with a disposable profile. The database integration test creates its own temporary library; it does not use your existing libraries.
 
